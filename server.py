@@ -1,4 +1,5 @@
 
+from secureprotol import PaillierEncrypt, FakeEncrypt
 from flask import *
 from flask_socketio import SocketIO
 from flask_socketio import *
@@ -10,6 +11,7 @@ class FLServer(object):
     MAX_NUM_ROUNDS = 50
     NUM_CLIENTS_CONTACTED_PER_ROUND = 1
     ROUNDS_BETWEEN_VALIDATIONS = 2
+    KEY_LENGTH = 1024
 
     def __init__(self, global_model, host, port):
 
@@ -18,9 +20,18 @@ class FLServer(object):
         self.ready_client_sids = set()
         self.main_client_id = None
         self.model_id = str(uuid.uuid4())
+        self.encrypt_operator = PaillierEncrypt()
+        self.encrypt_operator.generate_key(self.KEY_LENGTH)
+        self.public_key = self.encrypt_operator.get_public_key()
 
         self.host = host
         self.port = port
+
+        # training states
+        self.current_round = -1  # -1 for not yet started
+        self.current_round_client_updates = []
+        self.eval_client_updates = []
+        #####
 
         self.register_handles()
 
@@ -67,17 +78,51 @@ class FLServer(object):
             print("client ready for training", request.sid, data)
             self.ready_client_sids.add(request.sid)
             if len(self.ready_client_sids) >= FLServer.MIN_NUM_WORKERS and self.current_round == -1 and self.main_client_id is not None:
+                for rid in handle_client_ready:
+                    emit('send_public_key', {
+                        'model_id': self.model_id,
+                        'round_number': -1,
+                        'public_key': self.public_key,
+
+                        'weights_format': 'pickle',
+                        'run_validation': self.current_round % FLServer.ROUNDS_BETWEEN_VALIDATIONS == 0,
+                    }, room=rid)
+                emit('send_public_key', {
+                    'model_id': self.model_id,
+                    'round_number': -1,
+                    'public_key': self.public_key,
+
+                    'weights_format': 'pickle',
+                    'run_validation': self.current_round % FLServer.ROUNDS_BETWEEN_VALIDATIONS == 0,
+                }, room=self.main_client_id)
                 self.train_next_round()
 
         @self.socketio.on('main_client_ready')
-        def handle_main_ready(data)
+        def handle_main_ready(data):
             print('main_client ready for training', request.sid, data)
             self.main_client_id = request.sid
             if len(self.ready_client_sids) >= FLServer.MIN_NUM_WORKERS and self.current_round == -1 and self.main_client_id is not None:
+                for rid in handle_client_ready:
+                    emit('send_public_key', {
+                        'model_id': self.model_id,
+                        'round_number': -1,
+                        'public_key':self.public_key,
+
+                        'weights_format': 'pickle',
+                        'run_validation': self.current_round % FLServer.ROUNDS_BETWEEN_VALIDATIONS == 0,
+                    }, room=rid)
+                emit('send_public_key', {
+                    'model_id': self.model_id,
+                    'round_number': -1,
+                    'public_key': self.public_key,
+
+                    'weights_format': 'pickle',
+                    'run_validation': self.current_round % FLServer.ROUNDS_BETWEEN_VALIDATIONS == 0,
+                }, room=self.main_client_id)
                 self.train_next_round()
 
-        @self.socketio.on('client_update')
-        def handle_client_update(data):
+        @self.socketio.on('client_gradient')
+        def handle_client_gradients(data):
             print("received client update of bytes: ", sys.getsizeof(data))
             print("handle client_update", request.sid)
             for x in data:
@@ -157,3 +202,25 @@ class FLServer(object):
                 print("aggr_test_accuracy", aggr_test_accuracy)
                 print("== done ==")
                 self.eval_client_updates = None  # special value, forbid evaling again
+
+
+    def start(self):
+        self.socketio.run(self.app, host=self.host, port=self.port)
+
+# def obj_to_pickle_string(x):
+#     return codecs.encode(pickle.dumps(x), "base64").decode()
+#     # return msgpack.packb(x, default=msgpack_numpy.encode)
+#     # TODO: compare pickle vs msgpack vs json for serialization; tradeoff: computation vs network IO
+#
+# def pickle_string_to_obj(s):
+#     return pickle.loads(codecs.decode(s.encode(), "base64"))
+#     # return msgpack.unpackb(s, object_hook=msgpack_numpy.decode)
+
+if __name__ == '__main__':
+    # When the application is in debug mode the Werkzeug development server is still used
+    # and configured properly inside socketio.run(). In production mode the eventlet web server
+    # is used if available, else the gevent web server is used.
+
+    server = FLServer(GlobalModel_MNIST_CNN, "127.0.0.1", 5000)
+    print("listening on 127.0.0.1:5000");
+    server.start()
